@@ -1,0 +1,163 @@
+'''
+Links:
+emojis:
+https://gist.github.com/rxaviers/7360908
+
+Get cards from s list:
+https://api.trello.com/1/lists/<ListId>/cards?
+
+Get attachemnts from a card:
+https://api.trello.com/1/cards/<CardId>/attachments?
+
+'''
+
+import boto3
+import json
+import urllib.request
+import logging
+import os
+import random
+import base64
+
+from base64 import b64decode
+from urllib.parse import parse_qs
+from typing import NamedTuple
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+quotesContent = []
+
+# build the response
+def respond(err, res=None):
+    if err:
+        logger.error(err)
+        return res +". Error: "+str(err)
+    else:
+        return res
+    
+
+'''
+Generic methods for retreiving data
+'''
+def getURLResponse(sUrl, header=None):
+    if header==None:
+        header={'Accept': 'application/json'}
+    res = urllib.request.urlopen(urllib.request.Request(
+            url=sUrl,
+            headers=header,
+            method='GET'),
+            timeout=5)
+    return res
+    
+def getURLResponseJson(sUrl, header=None):
+    res = getURLResponse(sUrl,header)
+    contentStr = res.read()
+    return json.loads(contentStr)
+    
+def trello_getCardAttachmentsDetails(cardId):
+    trelloAppKey=os.environ['trelloAppKey']
+    sUrl='https://api.trello.com/1/cards/'+cardId+'/attachments?key='+trelloAppKey+'&token='+os.environ['trello']
+    return getURLResponseJson(sUrl)
+
+def trello_getCard(cardId):
+    trelloAppKey=os.environ['trelloAppKey']
+    sUrl='https://api.trello.com/1/cards/'+cardId+'?key='+trelloAppKey+'&token='+os.environ['trello']
+    return getURLResponseJson(sUrl)
+    
+def trello_getCardContent(cardId):
+    contentStr = trello_getCard(cardId)
+    return contentStr['desc']
+
+def trello_getCardAttachment(cardId, index):
+    trelloAppKey=os.environ['trelloAppKey']
+    contentStr = trello_getCardAttachmentsDetails(cardId)
+    # read the attachemnt file path (to be accessed using OAuth)
+    sUrl='https://api.trello.com/1/cards/'+cardId+'/attachments/'+contentStr[index]['id']+'?key='+trelloAppKey+'&token='+os.environ['trello']
+        
+    contentStr = getURLResponseJson(sUrl)
+    sUrl = contentStr['url']
+    header ={'Accept': 'application/json',
+                     'Authorization' : 'OAuth oauth_consumer_key="'+trelloAppKey+'",oauth_token="'+os.environ['trello']+'"'}
+    # get the attachment using OAuth in the header
+    logger.info("received url %s" %(sUrl))
+  
+    res = getURLResponse(sUrl,header)
+    return res
+    
+def getValueFromJson(url, key1, key2):
+    content = getURLResponseJson(url)
+    if len(key2)>0:
+        return content[key1][key2]
+    return content[key1]
+
+'''
+Process specific commads
+'''
+
+def process_chuck():
+    return respond(None, "%s :joy:" % (getValueFromJson('http://api.icndb.com/jokes/random', 'value','joke')))
+    
+def process_joke():
+    sUrl='https://dad-jokes.p.rapidapi.com/random/joke'
+    header ={'Accept': 'application/json',
+                     'X-RapidAPI-Key' :os.environ['dad']}
+    content = getURLResponseJson(sUrl,header)
+      
+    return respond(None, "*Q*: %s\n*A*: %s :sunglasses:" % (content['body'][0]['setup'], content['body'][0]['punchline']))
+        
+def process_inspire(cardId):
+    global quotesContent
+    if len(quotesContent) == 0:
+        logger.info("reloading quotes from Trello card")
+        
+        res = trello_getCardAttachment(cardId,0)
+        contentStr = res.read()
+        #logger.info(quotesContent)
+        quotesContent = json.loads(contentStr)
+    else:
+        logger.info("reloading quotes from memory")
+    
+    logger.info("number of quotes: %i " %(len(quotesContent)))
+    
+    randomQuote = random.randrange(0,len(quotesContent)-1)
+    return respond(None, "\"%s\", *%s*\n(quote no. %i out of %i)" % (quotesContent[randomQuote]['text'], quotesContent[randomQuote]['author'],randomQuote+1,len(quotesContent)))
+
+
+# The main Lambda function method
+def lambda_handler(event, context):
+    try:
+        checkToken = True
+        logger.info('start '+str(event))
+        #return respond(None, str(event))
+        params = event
+        token = params['token']
+        if checkToken and os.environ['slacktoken'] != token:
+            return respond(Exception('Invalid request was made'))  
+
+        user = params['user_name']
+        command = params['command']
+        channel = params['channel_name']
+        if 'text' in params:
+            command_text = params['text']
+        else:
+            command_text = ''
+         if 'action' in params and len(params['action'])>0:
+            action = params['action']
+        else:
+            action = ''
+            
+        if command == '/joke':
+            return process_joke()
+        elif command == '/chuck':
+            return process_chuck()
+        elif command == '/inspire':
+            return process_inspire(action)
+        elif command == '/sprint' or command == '/events':
+            if len(action)>0:
+                return trello_getCardContent(action)
+            else:
+                return respond(Exception('No action was requested'))  
+        else:
+            return respond(None, "%s *invoked* %s in %s ```other : %s```" % (user, command, channel, command_text))
+    except Exception as ex:
+        return respond(ex, "Ooopss.. We're not perfect")
